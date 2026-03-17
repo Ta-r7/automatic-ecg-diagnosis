@@ -426,7 +426,7 @@ def main():
         labels_df = pd.read_excel(args.excel)
     else:
         # Auto-detect separator (comma or semicolon)
-        labels_df = pd.read_csv(args.excel, sep=None, engine='python')
+        labels_df = pd.read_csv(args.excel, sep=None, engine='python', encoding='utf-8-sig')
 
     # Ensure Record_ID is string
     labels_df['Record_ID'] = labels_df['Record_ID'].astype(str).str.strip()
