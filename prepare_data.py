@@ -425,7 +425,8 @@ def main():
     if args.excel.endswith('.xlsx') or args.excel.endswith('.xls'):
         labels_df = pd.read_excel(args.excel)
     else:
-        labels_df = pd.read_csv(args.excel)
+        # Auto-detect separator (comma or semicolon)
+        labels_df = pd.read_csv(args.excel, sep=None, engine='python')
 
     # Ensure Record_ID is string
     labels_df['Record_ID'] = labels_df['Record_ID'].astype(str).str.strip()
