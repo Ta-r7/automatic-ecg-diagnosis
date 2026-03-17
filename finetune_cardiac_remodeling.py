@@ -128,6 +128,13 @@ def main():
                         help='Output directory (default: ./finetune_output)')
     parser.add_argument('--dataset_name', type=str, default='tracings',
                         help='HDF5 dataset name (default: tracings)')
+    parser.add_argument('--manual_class_weights', action='store_true', default=False,
+                        help='Use manual class weights instead of auto-computed '
+                             '(default: False, i.e. auto-compute from data)')
+    parser.add_argument('--class_weight_neg', type=float, default=1.0,
+                        help='Manual class weight for negative class (default: 1.0)')
+    parser.add_argument('--class_weight_pos', type=float, default=4.0,
+                        help='Manual class weight for positive class (default: 4.0)')
     args = parser.parse_args()
 
     # Create output directory
@@ -153,15 +160,19 @@ def main():
     print(f"Output classes: {args.n_classes}")
 
     # Class weights to handle imbalance
-    train_labels = train_seq.y
-    if train_labels.ndim > 1:
-        train_labels_flat = train_labels[:, 0]
+    if args.manual_class_weights:
+        class_weight = {0: args.class_weight_neg, 1: args.class_weight_pos}
+        print(f"Class weights (manual): {{0: {class_weight[0]:.2f}, 1: {class_weight[1]:.2f}}}")
     else:
-        train_labels_flat = train_labels
-    n_neg = np.sum(train_labels_flat == 0)
-    n_pos = np.sum(train_labels_flat == 1)
-    class_weight = {0: 1.0, 1: n_neg / max(n_pos, 1)}
-    print(f"Class weights: {{0: {class_weight[0]:.2f}, 1: {class_weight[1]:.2f}}}")
+        train_labels = train_seq.y
+        if train_labels.ndim > 1:
+            train_labels_flat = train_labels[:, 0]
+        else:
+            train_labels_flat = train_labels
+        n_neg = np.sum(train_labels_flat == 0)
+        n_pos = np.sum(train_labels_flat == 1)
+        class_weight = {0: 1.0, 1: n_neg / max(n_pos, 1)}
+        print(f"Class weights (auto): {{0: {class_weight[0]:.2f}, 1: {class_weight[1]:.2f}}}")
 
     # Callbacks
     callbacks = [
