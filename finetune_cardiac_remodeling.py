@@ -167,10 +167,10 @@ def main():
             os.path.join(args.output_dir, 'finetune_training.log'),
             append=False),
         ModelCheckpoint(
-            os.path.join(args.output_dir, 'best_model.hdf5'),
+            os.path.join(args.output_dir, 'best_model.keras'),
             save_best_only=True, monitor='val_loss', verbose=1),
         ModelCheckpoint(
-            os.path.join(args.output_dir, 'last_model.hdf5'),
+            os.path.join(args.output_dir, 'last_model.keras'),
             verbose=0),
     ]
 
@@ -187,10 +187,10 @@ def main():
         verbose=1)
 
     # Save final model
-    final_path = os.path.join(args.output_dir, 'cardiac_remodeling_model.hdf5')
+    final_path = os.path.join(args.output_dir, 'cardiac_remodeling_model.keras')
     model.save(final_path)
     print(f"\nFinal model saved to: {final_path}")
-    print(f"Best model saved to: {os.path.join(args.output_dir, 'best_model.hdf5')}")
+    print(f"Best model saved to: {os.path.join(args.output_dir, 'best_model.keras')}")
     print(f"Training log: {os.path.join(args.output_dir, 'finetune_training.log')}")
 
 

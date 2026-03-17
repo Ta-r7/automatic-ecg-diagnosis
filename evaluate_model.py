@@ -11,7 +11,7 @@ Generates:
 
 Usage:
     python evaluate_model.py \
-        --model finetune_output/best_model.hdf5 \
+        --model finetune_output/best_model.keras \
         --hdf5 prepared_data/ecg_tracings.hdf5 \
         --labels prepared_data/labels.csv \
         --split_info prepared_data/split_info.csv \
@@ -188,7 +188,7 @@ def main():
     parser = argparse.ArgumentParser(
         description='Evaluate fine-tuned cardiac remodeling model.')
     parser.add_argument('--model', type=str,
-                        default='finetune_output/best_model.hdf5',
+                        default='finetune_output/best_model.keras',
                         help='Path to fine-tuned model')
     parser.add_argument('--hdf5', type=str,
                         default='prepared_data/ecg_tracings.hdf5',
