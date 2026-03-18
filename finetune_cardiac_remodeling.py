@@ -148,6 +148,7 @@ def main():
     loss = 'binary_crossentropy'
     opt = Adam(learning_rate=args.lr)
     model.compile(loss=loss, optimizer=opt, metrics=['accuracy'])
+    print(f"\nLearning rate: {args.lr}")
     model.summary()
 
     # Load data
