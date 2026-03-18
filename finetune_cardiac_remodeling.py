@@ -31,7 +31,7 @@ import os
 import numpy as np
 import tensorflow as tf
 from tensorflow import keras
-from tensorflow.keras.layers import Dense
+from tensorflow.keras.layers import Dense, Dropout
 from tensorflow.keras.models import Model
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.callbacks import (
@@ -42,7 +42,7 @@ from tensorflow.keras.callbacks import (
 from datasets import ECGSequence
 
 
-def build_finetune_model(pretrained_path, n_classes, freeze_until=None):
+def build_finetune_model(pretrained_path, n_classes, freeze_until=None, dropout_rate=0.0):
     """Load pre-trained model and replace the output layer for fine-tuning.
 
     Parameters
@@ -69,6 +69,11 @@ def build_finetune_model(pretrained_path, n_classes, freeze_until=None):
     # The layer before the output Dense is 'flatten_1'
     feature_layer = base_model.get_layer('flatten_1')
     features = feature_layer.output
+
+    # Add dropout before classification head
+    if dropout_rate > 0:
+        features = Dropout(dropout_rate, name='head_dropout')(features)
+        print(f"Dropout rate: {dropout_rate}")
 
     # Add new classification head
     new_output = Dense(
@@ -135,6 +140,8 @@ def main():
                         help='Manual class weight for negative class (default: 1.0)')
     parser.add_argument('--class_weight_pos', type=float, default=4.0,
                         help='Manual class weight for positive class (default: 4.0)')
+    parser.add_argument('--dropout', type=float, default=0.5,
+                        help='Dropout rate before output layer (default: 0.5, 0=disabled)')
     args = parser.parse_args()
 
     # Create output directory
@@ -142,7 +149,7 @@ def main():
 
     # Build model
     freeze_until = None if args.no_freeze else args.freeze_until
-    model = build_finetune_model(args.pretrained_model, args.n_classes, freeze_until)
+    model = build_finetune_model(args.pretrained_model, args.n_classes, freeze_until, args.dropout)
 
     # Compile
     loss = 'binary_crossentropy'
