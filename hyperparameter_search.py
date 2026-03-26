@@ -1,22 +1,26 @@
 """
-Automated hyperparameter search for ECG cardiac remodeling fine-tuning.
+Smart hyperparameter search for ECG cardiac remodeling fine-tuning.
 
-Tries many combinations of learning rate, batch size, freeze strategy,
-dropout, and class weights. Trains each combination, evaluates on the
-test set, and reports the best configuration.
+Phase 1 (Exploration): Random search across broad parameter space.
+Phase 2 (Exploitation): Focuses on the best-performing region and
+         fine-tunes around those hyperparameters.
+
+Only keeps top 10 model directories. Deletes the rest to save disk space.
 
 Usage:
     python hyperparameter_search.py prepared_data/ecg_tracings.hdf5 prepared_data/labels.csv \
-        --pretrained_model model.hdf5 --n_runs_per_config 2
+        --pretrained_model model.hdf5
 
 Output:
-    ./hyperparam_search_output/results_summary.csv   — all results sorted by AUC
-    ./hyperparam_search_output/best_model.keras       — best model saved
+    ./hyperparam_search_output/results_summary.csv  — all results sorted by AUC
+    ./hyperparam_search_output/top_N/               — top 10 model directories
+    ./hyperparam_search_output/best_model.keras      — overall best model
 """
 
 import argparse
-import itertools
 import os
+import random
+import shutil
 import time
 
 import numpy as np
@@ -29,7 +33,7 @@ from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.callbacks import (
     EarlyStopping, ReduceLROnPlateau, ModelCheckpoint
 )
-from sklearn.metrics import roc_auc_score, f1_score
+from sklearn.metrics import roc_auc_score, roc_curve, f1_score
 
 from datasets import ECGSequence
 
@@ -64,13 +68,14 @@ def build_model(pretrained_path, n_classes, freeze_until=None, dropout_rate=0.0)
     return model
 
 
-def run_single_config(config, args, config_id):
+def run_single_config(config, args, config_id, total):
     """Train and evaluate a single hyperparameter configuration."""
     print(f"\n{'='*60}")
-    print(f"Config {config_id}: {config}")
+    print(f"[{config_id}/{total}] Config: LR={config['lr']}  BS={config['batch_size']}  "
+          f"Freeze={config['freeze_until'] or 'none'}  DO={config['dropout']}  "
+          f"CW={config['class_weight_pos']}")
     print(f"{'='*60}")
 
-    # Build model
     model = build_model(
         args.pretrained_model,
         args.n_classes,
@@ -103,7 +108,7 @@ def run_single_config(config, args, config_id):
     else:
         cw = {0: 1.0, 1: config['class_weight_pos']}
 
-    # Callbacks
+    # Save model in temp dir
     config_dir = os.path.join(args.output_dir, f"config_{config_id}")
     os.makedirs(config_dir, exist_ok=True)
 
@@ -140,14 +145,11 @@ def run_single_config(config, args, config_id):
 
     y_prob = model.predict(val_x, batch_size=32, verbose=0).flatten()
 
-    # Metrics
     try:
         val_auc = roc_auc_score(val_y, y_prob)
     except ValueError:
         val_auc = 0.0
 
-    # Optimal threshold (Youden)
-    from sklearn.metrics import roc_curve
     fpr, tpr, thresholds = roc_curve(val_y, y_prob)
     j_scores = tpr - fpr
     best_idx = np.argmax(j_scores)
@@ -169,6 +171,7 @@ def run_single_config(config, args, config_id):
 
     result = {
         'config_id': config_id,
+        'phase': config.get('phase', 1),
         'lr': config['lr'],
         'batch_size': config['batch_size'],
         'freeze_until': config['freeze_until'] or 'none',
@@ -186,19 +189,110 @@ def run_single_config(config, args, config_id):
         'train_time_s': round(train_time, 1),
     }
 
-    print(f"  AUC={val_auc:.3f}  F1={val_f1:.3f}  Sens={sensitivity:.3f}  "
+    print(f"  => AUC={val_auc:.3f}  F1={val_f1:.3f}  Sens={sensitivity:.3f}  "
           f"Spec={specificity:.3f}  Epochs={epochs_run}  Time={train_time:.0f}s")
 
-    # Clean up to free memory
     del model
     keras.backend.clear_session()
 
     return result, config_dir
 
 
+def generate_phase1_configs(n_configs):
+    """Phase 1: broad random exploration."""
+    configs = []
+    for _ in range(n_configs):
+        config = {
+            'phase': 1,
+            'lr': random.choice([0.01, 0.005, 0.001, 0.0005, 0.0001]),
+            'batch_size': random.choice([8, 16, 32]),
+            'freeze_until': random.choice([
+                'batch_normalization_3',   # first 2 blocks
+                'batch_normalization_5',   # first 3 blocks
+                'batch_normalization_7',   # first 4 blocks
+                None,                       # no freeze
+            ]),
+            'dropout': random.choice([0.0, 0.2, 0.3, 0.4, 0.5]),
+            'class_weight_pos': random.choice(['auto', 2.0, 3.0, 4.0, 5.0]),
+        }
+        configs.append(config)
+    return configs
+
+
+def generate_phase2_configs(top_results, n_configs):
+    """Phase 2: exploit best results — generate variations around top configs."""
+    configs = []
+
+    for _, row in top_results.iterrows():
+        base_lr = row['lr']
+        base_bs = int(row['batch_size'])
+        base_freeze = row['freeze_until'] if row['freeze_until'] != 'none' else None
+        base_dropout = row['dropout']
+        base_cw = row['class_weight_pos']
+
+        # Try small variations around this config
+        lr_variations = [base_lr * 0.5, base_lr, base_lr * 2.0]
+        dropout_variations = [
+            max(0, base_dropout - 0.1),
+            base_dropout,
+            min(0.7, base_dropout + 0.1)
+        ]
+
+        try:
+            cw_val = float(base_cw)
+            cw_variations = [max(1.0, cw_val - 1.0), cw_val, cw_val + 1.0]
+        except (ValueError, TypeError):
+            cw_variations = ['auto']
+
+        for lr in lr_variations:
+            for do in dropout_variations:
+                config = {
+                    'phase': 2,
+                    'lr': round(lr, 6),
+                    'batch_size': base_bs,
+                    'freeze_until': base_freeze,
+                    'dropout': round(do, 2),
+                    'class_weight_pos': random.choice(cw_variations),
+                }
+                configs.append(config)
+
+    # Deduplicate and limit
+    seen = set()
+    unique_configs = []
+    for c in configs:
+        key = (c['lr'], c['batch_size'], c['freeze_until'], c['dropout'],
+               str(c['class_weight_pos']))
+        if key not in seen:
+            seen.add(key)
+            unique_configs.append(c)
+
+    random.shuffle(unique_configs)
+    return unique_configs[:n_configs]
+
+
+def cleanup_keep_top_n(all_results, output_dir, top_n=10):
+    """Delete all config directories except the top N by AUC."""
+    results_df = pd.DataFrame(all_results)
+    results_df = results_df.sort_values('val_auc', ascending=False)
+
+    top_ids = set(results_df.head(top_n)['config_id'].astype(int).tolist())
+    all_ids = set(results_df['config_id'].astype(int).tolist())
+    remove_ids = all_ids - top_ids
+
+    removed = 0
+    for cid in remove_ids:
+        config_dir = os.path.join(output_dir, f"config_{cid}")
+        if os.path.exists(config_dir):
+            shutil.rmtree(config_dir)
+            removed += 1
+
+    print(f"\nCleanup: kept top {top_n} models, removed {removed} directories")
+    return results_df
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description='Hyperparameter search for ECG fine-tuning.')
+        description='Smart hyperparameter search for ECG fine-tuning.')
     parser.add_argument('path_to_hdf5', type=str,
                         help='Path to HDF5 file with ECG tracings')
     parser.add_argument('path_to_csv', type=str,
@@ -216,99 +310,100 @@ def main():
                         help='Output directory')
     parser.add_argument('--dataset_name', type=str, default='tracings',
                         help='HDF5 dataset name')
-    parser.add_argument('--n_runs_per_config', type=int, default=1,
-                        help='Runs per config to average out randomness (default: 1)')
+    parser.add_argument('--phase1_runs', type=int, default=30,
+                        help='Number of random exploration runs (default: 30)')
+    parser.add_argument('--phase2_runs', type=int, default=20,
+                        help='Number of exploitation runs around best configs (default: 20)')
+    parser.add_argument('--top_n', type=int, default=10,
+                        help='Keep only top N model directories (default: 10)')
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
 
-    # === HYPERPARAMETER GRID ===
-    param_grid = {
-        'lr': [0.01, 0.001, 0.0005, 0.0001],
-        'batch_size': [16, 32],
-        'freeze_until': [
-            'batch_normalization_3',   # freeze first 2 residual blocks
-            'batch_normalization_7',   # freeze first 4 residual blocks
-            None,                       # no freeze (full fine-tune)
-        ],
-        'dropout': [0.0, 0.3, 0.5],
-        'class_weight_pos': ['auto', 3.0, 5.0],
-    }
-
-    # Generate all combinations
-    keys = list(param_grid.keys())
-    values = list(param_grid.values())
-    all_configs = [dict(zip(keys, combo)) for combo in itertools.product(*values)]
-
-    total = len(all_configs) * args.n_runs_per_config
-    print(f"Hyperparameter search: {len(all_configs)} configs x "
-          f"{args.n_runs_per_config} runs = {total} total runs")
-    print(f"Parameter grid:")
-    for k, v in param_grid.items():
-        print(f"  {k}: {v}")
-
-    # Run all configurations
+    total_runs = args.phase1_runs + args.phase2_runs
     all_results = []
-    best_auc = 0
-    best_config_dir = None
     config_id = 0
 
-    for config in all_configs:
-        for run in range(args.n_runs_per_config):
-            config_id += 1
-            print(f"\n[{config_id}/{total}]", end="")
+    # ==========================================
+    # PHASE 1: EXPLORATION (broad random search)
+    # ==========================================
+    print("\n" + "#" * 60)
+    print("PHASE 1: EXPLORATION — random search across broad parameter space")
+    print("#" * 60)
 
-            try:
-                result, config_dir = run_single_config(config, args, config_id)
-                all_results.append(result)
+    phase1_configs = generate_phase1_configs(args.phase1_runs)
+    print(f"Running {args.phase1_runs} random configurations...\n")
 
-                if result['val_auc'] > best_auc:
-                    best_auc = result['val_auc']
-                    best_config_dir = config_dir
+    for config in phase1_configs:
+        config_id += 1
+        try:
+            result, _ = run_single_config(config, args, config_id, total_runs)
+            all_results.append(result)
+        except Exception as e:
+            print(f"  FAILED: {e}")
 
-            except Exception as e:
-                print(f"  FAILED: {e}")
-                all_results.append({
-                    'config_id': config_id,
-                    'lr': config['lr'],
-                    'batch_size': config['batch_size'],
-                    'freeze_until': config['freeze_until'] or 'none',
-                    'dropout': config['dropout'],
-                    'class_weight_pos': str(config['class_weight_pos']),
-                    'val_auc': 0, 'val_f1': 0, 'val_loss': 999,
-                    'accuracy': 0, 'sensitivity': 0, 'specificity': 0,
-                    'ppv': 0, 'threshold': 0.5,
-                    'epochs_run': 0, 'train_time_s': 0,
-                })
+    # Analyze phase 1 results
+    phase1_df = pd.DataFrame(all_results)
+    phase1_df = phase1_df.sort_values('val_auc', ascending=False)
 
-    # Save results
-    results_df = pd.DataFrame(all_results)
-    results_df = results_df.sort_values('val_auc', ascending=False)
+    print(f"\n{'='*60}")
+    print("PHASE 1 RESULTS — Top 5")
+    print("=" * 60)
+    for _, row in phase1_df.head(5).iterrows():
+        print(f"  AUC={row['val_auc']:.3f} | F1={row['val_f1']:.3f} | "
+              f"LR={row['lr']} | BS={int(row['batch_size'])} | "
+              f"Freeze={row['freeze_until']} | DO={row['dropout']} | "
+              f"CW={row['class_weight_pos']}")
+
+    # ==========================================
+    # PHASE 2: EXPLOITATION (refine best configs)
+    # ==========================================
+    print("\n" + "#" * 60)
+    print("PHASE 2: EXPLOITATION — refining around best configurations")
+    print("#" * 60)
+
+    top3_phase1 = phase1_df.head(3)
+    phase2_configs = generate_phase2_configs(top3_phase1, args.phase2_runs)
+    print(f"Running {len(phase2_configs)} refined configurations "
+          f"based on top 3 from Phase 1...\n")
+
+    for config in phase2_configs:
+        config_id += 1
+        try:
+            result, _ = run_single_config(config, args, config_id, total_runs)
+            all_results.append(result)
+        except Exception as e:
+            print(f"  FAILED: {e}")
+
+    # ==========================================
+    # FINAL: cleanup, save results, report
+    # ==========================================
+    results_df = cleanup_keep_top_n(all_results, args.output_dir, args.top_n)
+
+    # Save CSV
     results_path = os.path.join(args.output_dir, 'results_summary.csv')
     results_df.to_csv(results_path, index=False)
 
     # Copy best model
-    if best_config_dir:
-        import shutil
-        best_src = os.path.join(best_config_dir, 'best_model.keras')
-        best_dst = os.path.join(args.output_dir, 'best_model.keras')
-        if os.path.exists(best_src):
-            shutil.copy2(best_src, best_dst)
+    best_id = int(results_df.iloc[0]['config_id'])
+    best_src = os.path.join(args.output_dir, f"config_{best_id}", 'best_model.keras')
+    best_dst = os.path.join(args.output_dir, 'best_model.keras')
+    if os.path.exists(best_src):
+        shutil.copy2(best_src, best_dst)
 
-    # Print summary
+    # Print final report
     print("\n" + "=" * 80)
     print("HYPERPARAMETER SEARCH COMPLETE")
     print("=" * 80)
-    print(f"\nTotal configurations tested: {len(all_configs)}")
-    print(f"Total runs: {total}")
-    print(f"\nResults saved to: {results_path}")
+    print(f"Total runs: {len(all_results)} "
+          f"(Phase 1: {args.phase1_runs}, Phase 2: {len(phase2_configs)})")
+    print(f"Results saved to: {results_path}")
 
     print(f"\n{'='*80}")
-    print("TOP 10 CONFIGURATIONS (sorted by AUC)")
+    print(f"TOP {args.top_n} CONFIGURATIONS (sorted by AUC)")
     print("=" * 80)
-    top10 = results_df.head(10)
-    for _, row in top10.iterrows():
-        print(f"  Config {int(row['config_id']):3d} | "
+    for rank, (_, row) in enumerate(results_df.head(args.top_n).iterrows(), 1):
+        print(f"  #{rank:2d} [Phase {int(row['phase'])}] | "
               f"AUC={row['val_auc']:.3f} | F1={row['val_f1']:.3f} | "
               f"Sens={row['sensitivity']:.3f} | Spec={row['specificity']:.3f} | "
               f"LR={row['lr']} | BS={int(row['batch_size'])} | "
@@ -319,6 +414,7 @@ def main():
     print("BEST CONFIGURATION")
     print("=" * 80)
     best = results_df.iloc[0]
+    print(f"  Phase:            {int(best['phase'])}")
     print(f"  Learning rate:    {best['lr']}")
     print(f"  Batch size:       {int(best['batch_size'])}")
     print(f"  Freeze until:     {best['freeze_until']}")
@@ -331,13 +427,13 @@ def main():
     print(f"  Specificity:      {best['specificity']:.3f}")
     print(f"  Accuracy:         {best['accuracy']:.3f}")
     print(f"  Threshold:        {best['threshold']:.3f}")
-    print(f"\n  Best model saved to: {os.path.join(args.output_dir, 'best_model.keras')}")
+    print(f"\n  Best model: {best_dst}")
 
-    # Print command to reproduce best run
+    # Reproduce command
     freeze_arg = (f"--freeze_until {best['freeze_until']}"
                   if best['freeze_until'] != 'none'
                   else "--no_freeze")
-    print(f"\nTo reproduce the best run:")
+    print(f"\nReproduce best run:")
     print(f"  python finetune_cardiac_remodeling.py {args.path_to_hdf5} {args.path_to_csv} "
           f"--pretrained_model {args.pretrained_model} "
           f"--n_classes {args.n_classes} "
